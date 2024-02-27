@@ -36,13 +36,6 @@ void createRDMAResource(struct RDMAResource* res)
 {
     int num_devices;
 
-    if (res) {
-        destroyRDMAResource(res);
-        /*free(res);*/
-    }
-
-    memset(res, 0, sizeof * res);
-
     struct ibv_device** device_list = ibv_get_device_list(&num_devices);
     if (!device_list) {
         fprintf(stderr, "Unable to get HCA device list\n");
@@ -55,15 +48,18 @@ void createRDMAResource(struct RDMAResource* res)
         exit(1);
     }
 
-    res->device = device_list[DeviceNumber];
-    res->context = ibv_open_device(res->device);
-    res->deviceName = ibv_get_device_name(res->device);
-
+    for (int i = 0; i < num_devices; i++) {
+        if (!strcmp(res->deviceName, ibv_get_device_name(device_list[i]))) {
+            fprintf(stdout, "Select HCA device %s\n", ibv_get_device_name(device_list[i]));
+            res->device = device_list[i];
+            res->context = ibv_open_device(device_list[i]);
+            break;
+        }
+    }
     ibv_free_device_list(device_list);
-    fprintf(stdout, "Select HCA device %s\n", res->deviceName);
 
     if (res->context == 0) {
-        fprintf(stderr, "Unable to get the device %d\n", DeviceNumber);
+        fprintf(stderr, "Unable to get the device: %s\n", res->deviceName);
         exit(1);
     }
 
@@ -75,9 +71,9 @@ void createRDMAResource(struct RDMAResource* res)
     }
 
     /* Optional. Query HCA port properties */
-    int rc = ibv_query_port(res->context, PortNumber, &res->portAttr);
+    int rc = ibv_query_port(res->context, res->devicePort, &res->portAttr);
     if (rc) {
-        fprintf(stderr, "Failed to query port %d attributes in device '%s'\n", PortNumber, res->deviceName);
+        fprintf(stderr, "Failed to query port %d attributes in device '%s'\n", res->devicePort, res->deviceName);
         destroyRDMAResource(res);
         exit(1);
     }
@@ -85,7 +81,7 @@ void createRDMAResource(struct RDMAResource* res)
     /* Verify enable port and active connection */
     if (res->portAttr.phys_state != 5)
     {
-        fprintf(stderr, "Port %d in device '%s' not in LinkUp state\n", PortNumber, res->deviceName);
+        fprintf(stderr, "Port %d in device '%s' not in LinkUp state\n", res->devicePort, res->deviceName);
         destroyRDMAResource(res);
         exit(1);
     }
@@ -128,7 +124,7 @@ void createRDMAResource(struct RDMAResource* res)
 
     /* Create the Queue Pair */
     struct ibv_qp_init_attr qpInitAttr;
-    memset(&qpInitAttr, 0, sizeof(qpInitAttr));
+    memset(&qpInitAttr, 0, sizeof(ibv_qp_init_attr));
     qpInitAttr.qp_type = IBV_QPT_RC;
     qpInitAttr.sq_sig_all = 1;
     qpInitAttr.send_cq = res->compQueue;
@@ -146,8 +142,72 @@ void createRDMAResource(struct RDMAResource* res)
     fprintf(stdout, "QP with number 0x%x was created\n", res->queuePair->qp_num);
 }
 
-/* Connetc to Queue pair. Transition server side to RTR, client side to RTS */
-int connectQP(struct RDMAResource* res)
+/* Modify QP to INIT state */
+int modifyQPtoInit(struct RDMAResource* res)
 {
-    return 0;
+    struct ibv_qp_attr qpInitAttr;
+    memset(&qpInitAttr, 0, sizeof(ibv_qp_attr));
+    
+    qpInitAttr.qp_state = IBV_QPS_INIT;
+    qpInitAttr.port_num = res->devicePort;
+    qpInitAttr.pkey_index = 0;
+    qpInitAttr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+
+    int flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
+    int result = 0;
+    
+    result = ibv_modify_qp(res->queuePair, &qpInitAttr, flags);
+    if (result)
+        fprintf(stderr, "Failed to modify Queue Pair to Init state\n");
+    return result;
+}
+
+/* Modify QP to RTR state */
+int modifyQPtoRTR(struct RDMAResource* res)
+{
+    struct ibv_qp_attr rtrAttr;
+    memset(&rtrAttr, 0, sizeof(ibv_qp_attr));
+    
+    rtrAttr.qp_state = IBV_QPS_RTR;
+    rtrAttr.path_mtu = IBV_MTU_1024;
+    rtrAttr.rq_psn = 0;
+    rtrAttr.max_dest_rd_atomic = 1;
+    rtrAttr.min_rnr_timer = 0x12;
+    rtrAttr.ah_attr.is_global = 0;
+    rtrAttr.ah_attr.sl = 0;
+    rtrAttr.ah_attr.src_path_bits = 0;
+    rtrAttr.ah_attr.port_num = res->devicePort;
+
+    rtrAttr.dest_qp_num = res->remoteQueueName;
+    rtrAttr.ah_attr.dlid = res->remoteId;
+
+    int flags = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
+    int result = 0;
+
+    result = ibv_modify_qp(res->queuePair, &rtrAttr, flags);
+    if (result)
+        fprintf(stderr, "Failed to modify Queue Pair to RTR state\n");
+    return result;
+}
+
+/* Modify QP to RTS state */
+int modifyQPtoRTS(struct RDMAResource* res)
+{
+    struct ibv_qp_attr rtsAttr;
+    memset(&rtsAttr, 0, sizeof(ibv_qp_attr));
+
+    rtsAttr.qp_state = IBV_QPS_RTS;
+    rtsAttr.timeout = 0x12;
+    rtsAttr.retry_cnt = 7;
+    rtsAttr.rnr_retry = 7;
+    rtsAttr.sq_psn = 0;
+    rtsAttr.max_rd_atomic = 1;
+
+    int flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
+    int result = 0;
+
+    result = ibv_modify_qp(res->queuePair, &rtsAttr, flags);
+    if (result)
+        fprintf(stderr, "Failed to modify Queue Pair to RTS state\n");
+    return result;
 }

@@ -81,15 +81,20 @@
   <ItemGroup>
     <ClCompile Include="LibVerbsHelper.cpp" />
     <ClCompile Include="Source.cpp" />
+    <ClCompile Include="TCPClientServer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="LibVerbsHelper.h" />
     <ClInclude Include="Source.h" />
+    <ClInclude Include="TCPClientServer.h" />
   </ItemGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Link>
       <AdditionalDependencies>/usr/lib/x86_64-linux-gnu/libibverbs.so;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <ClCompile>
+      <CppLanguageStandard>c++11</CppLanguageStandard>
+    </ClCompile>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
